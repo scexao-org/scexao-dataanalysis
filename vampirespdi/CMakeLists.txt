@@ -3,6 +3,8 @@ set(LIBNAME "vampirespdi")
 # list source files (.c) other than modulename.c
 set(SOURCEFILES
 	polcycleproc.c
+	read_asciiconf.c
+	scanFITSfiles.c
 )
 
 # list include files (.h) that should be installed on system
