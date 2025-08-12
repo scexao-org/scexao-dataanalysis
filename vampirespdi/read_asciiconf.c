@@ -39,6 +39,8 @@ char* trim_whitespace(char* str) {
     return str;
 }
 
+
+
 KeyValuePair* parse_config(const char* filename, int* final_count) {
     FILE* file = fopen(filename, "r");
     if (!file) {
@@ -146,6 +148,18 @@ KeyValuePair* parse_config(const char* filename, int* final_count) {
             array = temp;
         }
     }
+
+    printf("Successfully parsed %d key-value pairs:\n", *final_count);
+    printf("------------------------------------------------------------------\n");
+    for (int i = 0; i < *final_count; i++) {
+        printf("Pair %d:  Key='%-20s' Value='%-25s'", i + 1, array[i].key, array[i].value);
+        if (array[i].comment) {
+            printf(" Comment='%s'", array[i].comment);
+        }
+        printf("\n");
+    }
+    printf("------------------------------------------------------------------\n\n");
+
 
     return array;
 }
