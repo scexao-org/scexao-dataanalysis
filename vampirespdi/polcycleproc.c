@@ -24,12 +24,11 @@ typedef struct {
 
 
 typedef struct {
-    int cam;        // Camera index
     double WPangle;
-    double MJD;     // Modified Julian Day
-    int fileindex;  // Which FITS file is this frame from?
-    int frameindex; // Which frame index within FITS file?
-} PDIdetectorframe;
+    double tstamp;     // Unix timestamp
+    int    fileindex;  // Which FITS file is this frame from?
+    int    frameindex; // Which frame index within FITS file?
+} PDIframe;
 
 
 
@@ -64,6 +63,71 @@ static CLICMDDATA CLIcmddata =
 
 
 
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/**
+ * @brief Reads an ASCII data file and populates a double array with time values.
+ *
+ * The function parses a file where each data line contains 7 columns. It extracts
+ * an index from column 1 and a time value from column 5, placing the time into
+ * the output array at the specified index. Lines starting with '#' are ignored.
+ *
+ * @param filename The path to the ASCII file to read.
+ * @param time_array A pointer to a pre-allocated double array to store the results.
+ * @param array_size The total number of elements in time_array (for bounds checking).
+ *
+ * @return Returns 0 on success, -1 on failure (e.g., file not found).
+ */
+static int read_time_data(const char *filename, double *time_array, size_t array_size) {
+    // Open the file for reading ("r" mode)
+    FILE *file_ptr = fopen(filename, "r");
+    if (file_ptr == NULL) {
+        perror("Error opening file");
+        return -1; // Indicate failure
+    }
+
+    char line_buffer[256]; // Buffer to hold one line of the file
+    int line_number = 0;
+
+    // Read the file line by line until the end
+    while (fgets(line_buffer, sizeof(line_buffer), file_ptr) != NULL) {
+        line_number++;
+
+        // Skip comment lines (which start with '#') or empty lines
+        if (line_buffer[0] == '#' || line_buffer[0] == '\n') {
+            continue;
+        }
+
+        int frame_index;
+        double absolute_time;
+
+        // Use sscanf to parse the line.
+        // The '%*...' format specifiers read a value but discard it (assignment suppression).
+        // We only care about the 1st (%d) and 5th (%lf) values.
+        int items_scanned = sscanf(line_buffer, "%d %*d %*lf %*lf %lf %*d %*d",
+                                   &frame_index, &absolute_time);
+
+        // A correctly formatted data line will result in 2 successfully scanned items.
+        if (items_scanned == 2) {
+            // CRITICAL: Perform a bounds check before writing to the array.
+            if (frame_index >= 0 && (size_t)frame_index < array_size) {
+                time_array[frame_index] = absolute_time;
+            } else {
+                fprintf(stderr, "Warning: Index %d on line %d is out of bounds for array of size %zu. Skipping.\n",
+                        frame_index, line_number, array_size);
+            }
+        }
+    }
+
+    // Close the file stream
+    fclose(file_ptr);
+
+    return 0; // Indicate success
+}
 
 
 
@@ -332,24 +396,192 @@ static errno_t compute_function()
     printf("cam2 : %d files  %d frames\n", cam2nbfile, cam2nbframe);
 
 
-    quick_sort2l(cam1time, cam1index, cam1nbfile);
-    quick_sort2l(cam2time, cam2index, cam2nbfile);
+    // collect frame data
+    PDIframe *cam_PDIframe[2]; // Array to hold pointers for cam1 and cam2
+    int *nbfile_arr[2] = {&cam1nbfile, &cam2nbfile};
+    double *time_arr[2] = {cam1time, cam2time};
+    long *index_arr[2] = {cam1index, cam2index};
+    int *nbframe_arr[2] = {&cam1nbframe, &cam2nbframe};
+
+    for (int cam_idx = 0; cam_idx < 2; cam_idx++) {
+        int current_nbfile = *nbfile_arr[cam_idx];
+        int current_nbframe = *nbframe_arr[cam_idx];
+        double *current_time = time_arr[cam_idx];
+        long *current_index = index_arr[cam_idx];
+
+        printf("\nCollecting timing info for cam%d (%d files, %d frames)\n", cam_idx + 1, current_nbfile, current_nbframe);
+
+        cam_PDIframe[cam_idx] = (PDIframe *)malloc(sizeof(PDIframe) * current_nbframe);
+        if (cam_PDIframe[cam_idx] == NULL) {
+            fprintf(stderr, "Memory allocation failed for cam%d_PDIframe\n", cam_idx + 1);
+            // Free previously allocated memory before returning
+            if (cam_idx > 0) free(cam_PDIframe[0]);
+            return 2;
+        }
+
+        int camframe_counter = 0;
+        for (int camfileidx = 0; camfileidx < current_nbfile; camfileidx++) {
+
+            // Get WP angle
+            double current_WPangle = -1.0;
+            for(int kwi_file=0; kwi_file<fitsfileinfo[current_index[camfileidx]].nbkey; kwi_file++) {
+                if (strcmp(fitsfileinfo[current_index[camfileidx]].kw[kwi_file].keyname, "RET-ANG1") == 0) {
+                    current_WPangle = atof(fitsfileinfo[current_index[camfileidx]].kw[kwi_file].value);
+                    break;
+                }
+            }
+
+
+            // get timing data
+            printf("File index %ld, name %s\n", current_index[camfileidx], fitsfileinfo[current_index[camfileidx]].fname);
+
+            char *timingfname = malloc(strlen(fitsfileinfo[current_index[camfileidx]].fname) + 8);
+            if (timingfname == NULL) {
+                // Handle memory allocation failure
+                free(cam_PDIframe[cam_idx]);
+                if (cam_idx > 0) free(cam_PDIframe[0]);
+                return 2;
+            }
+
+            strcpy(timingfname, fitsfileinfo[current_index[camfileidx]].fname);
+            char *dot_fits_ptr = strstr(timingfname, ".fits");
+            if (dot_fits_ptr != NULL) {
+                strcpy(dot_fits_ptr, ".txt");
+            }
+
+            /*printf("cam%d %2d/%2d %4d/%4d  FILE name %s -> %s\n",
+                   cam_idx + 1, camfileidx, current_nbfile,
+                   camframe_counter, current_nbframe,
+                   fitsfileinfo[current_index[camfileidx]].fname, timingfname);*/
+
+            double* timearray = (double*)malloc(sizeof(double) * fitsfileinfo[current_index[camfileidx]].naxes[2]);
+            if (timearray == NULL) {
+                // Handle memory allocation failure
+                free(cam_PDIframe[cam_idx]);
+                if (cam_idx > 0) free(cam_PDIframe[0]);
+                return 2;
+            }
+
+
+            read_time_data(timingfname,
+                           timearray,
+                           fitsfileinfo[current_index[camfileidx]].naxes[2]);
+            // print times
+            for (int i = 0; i < fitsfileinfo[current_index[camfileidx]].naxes[2]; i++) {
+                printf("time %4d = %.6f\n", i, timearray[i]);
+            }
+            free(timingfname);
+
+            printf("WRITING %ld frames\n", fitsfileinfo[current_index[camfileidx]].naxes[2]);
+
+            for (int frameidx = 0; frameidx < fitsfileinfo[current_index[camfileidx]].naxes[2]; frameidx++) {
+                cam_PDIframe[cam_idx][camframe_counter].WPangle = current_WPangle;
+                cam_PDIframe[cam_idx][camframe_counter].tstamp = timearray[frameidx]; // current_time[camfileidx];
+                cam_PDIframe[cam_idx][camframe_counter].fileindex = current_index[camfileidx];
+                cam_PDIframe[cam_idx][camframe_counter].frameindex = frameidx;
+                camframe_counter++;
+            }
+            free(timearray);
+        }
+    }
+
+
+
+    // print entries
+    for(int cam_idx=0; cam_idx<2; cam_idx++)
+        for(int camframe_counter=0; camframe_counter<*nbframe_arr[cam_idx]; camframe_counter++) {
+            printf("cam %d frame %5d  time %.6f  WPangle %4.1f  %s\n",
+                   cam_idx + 1, camframe_counter,
+                   cam_PDIframe[cam_idx][camframe_counter].tstamp,
+                   cam_PDIframe[cam_idx][camframe_counter].WPangle,
+                   fitsfileinfo[cam_PDIframe[cam_idx][camframe_counter].fileindex].fname
+                  );
+        }
+
+
+    double * cam1frametime = (double *)malloc(sizeof(double) * cam1nbframe);
+    long * cam1frameindex = (long *)malloc(sizeof(long) * cam1nbframe);
+    for(int camframe_counter=0; camframe_counter<*nbframe_arr[0]; camframe_counter++) {
+        cam1frametime[camframe_counter] = cam_PDIframe[0][camframe_counter].tstamp;
+        cam1frameindex[camframe_counter] = camframe_counter;
+    }
+
+    double * cam2frametime = (double *)malloc(sizeof(double) * cam2nbframe);
+    long * cam2frameindex = (long *)malloc(sizeof(long) * cam2nbframe);
+    for(int camframe_counter=0; camframe_counter<*nbframe_arr[1]; camframe_counter++) {
+        cam2frametime[camframe_counter] = cam_PDIframe[1][camframe_counter].tstamp;
+        cam2frameindex[camframe_counter] = camframe_counter;
+    }
+
+
+    quick_sort2l(cam1frametime, cam1frameindex, cam1nbframe);
+    quick_sort2l(cam2frametime, cam2frameindex, cam2nbframe);
+
+    for(int frame_idx=0; frame_idx<10; frame_idx++)
+    {
+        printf("TIME %.6f  %6f\n",
+               cam1frametime[frame_idx],
+               cam2frametime[frame_idx]);
+    }
 
     AlignedPoint* syncseq = (AlignedPoint *)malloc(sizeof(AlignedPoint) * (cam1nbframe+cam2nbframe));
 
-    int nbmatchedpts = synchronize_timestreams2(cam1time, cam1nbfile, cam2time, cam2nbfile, 1.0, syncseq, (cam1nbframe+cam2nbframe));
+    int nbmatchedpts =
+        synchronize_timestreams2(cam1frametime, cam1nbframe, cam2frametime, cam2nbframe, 0.1, syncseq, (cam1nbframe+cam2nbframe));
 
+
+
+
+    cam1nbframe = 0;
+    cam2nbframe = 0;
+    int previndex1 = -1;
+    int previndex2 = -1;
     for(int i=0; i<nbmatchedpts; i++)
     {
+        // print unmatched index1
+        while(syncseq[i].index1 - previndex1 > 1) {
+            previndex1++;
+            printf("MISSED %5d -----    %.6f ------ \n",
+                   previndex1,
+                   cam1frametime[previndex1]
+                  );
+        }
+        // print unmatched index2
+        while(syncseq[i].index2 - previndex2 > 1) {
+            previndex2++;
+            printf("MISSED ----- %5d    ------ %.6f\n",
+                   previndex2,
+                   cam2frametime[previndex2]
+                  );
+        }
+
+
+        int franeidx1 = cam1frameindex[syncseq[i].index1];
+        int franeidx2 = cam2frameindex[syncseq[i].index2];
         // print each matched point
-        printf("[%4d] %5d %5d    %.6f %.6f   %6f\n", i,
+        printf("[%4d] %5d %5d    %.6f %.6f   %6f    %2d %2d    %s %s\n", i,
                syncseq[i].index1, syncseq[i].index2,
-               cam1time[syncseq[i].index1],
-               cam2time[syncseq[i].index2],
-               cam1time[syncseq[i].index1]-cam1time[syncseq[i].index2]
-            );
+               cam1frametime[syncseq[i].index1],
+               cam2frametime[syncseq[i].index2],
+               cam1frametime[syncseq[i].index1]-cam2frametime[syncseq[i].index2],
+               cam_PDIframe[0][syncseq[i].index1].fileindex,
+               cam_PDIframe[1][syncseq[i].index2].fileindex,
+               fitsfileinfo[cam_PDIframe[0][syncseq[i].index1].fileindex].fname,
+               fitsfileinfo[cam_PDIframe[1][syncseq[i].index2].fileindex].fname
+              );
+
+
+
+
+        previndex1 = syncseq[i].index1;
+        previndex2 = syncseq[i].index2;
     }
 
+
+
+    for (int cam_idx = 0; cam_idx < 2; cam_idx++) {
+        free(cam_PDIframe[cam_idx]);
+    }
 
     free(syncseq);
 
