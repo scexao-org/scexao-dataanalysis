@@ -24,6 +24,8 @@ typedef struct {
     long naxes[8]; // max 8 dim
     int  nbkey;
     FITSkeyword *kw;
+    int selected; // selection flag, -1 if not selected
+    int *destframeidx; // array of destination frame indices
 } FITSfileinfo;
 
 

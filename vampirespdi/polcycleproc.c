@@ -4,9 +4,13 @@
 #include <float.h>  // Required for DBL_MAX
 
 #include "CommandLineInterface/CLIcore.h"
+#include "COREMOD_iofits/COREMOD_iofits.h"  // load_fits
+#include "COREMOD_tools/quicksort.h" // sort
+
+
 #include "read_asciiconf.h"
 #include "scanFITSfiles.h"
-#include "COREMOD_tools/quicksort.h" // sort
+
 
 
 
@@ -249,12 +253,72 @@ static errno_t compute_function()
 
     // Read rawdatadir entry from configuration
     char *rawdatadir = NULL;
+    long xsize = -1;
+    long ysize = -1;
+    int cropnb = -1;
+    long zsize = -1;
     for (int i = 0; i < pair_count; i++) {
         if (strcmp(config[i].key, "rawdatadir") == 0) {
             rawdatadir = config[i].value;
-            break;
+        }
+        if (strcmp(config[i].key, "cropxsize") == 0) {
+            xsize = atoi(config[i].value);
+        }
+
+        if (strcmp(config[i].key, "cropysize") == 0) {
+            ysize = atoi(config[i].value);
+        }
+
+        if (strcmp(config[i].key, "cropnb") == 0) {
+            cropnb = atoi(config[i].value);
         }
     }
+
+    int * cam1crop_xcenter = (int*)malloc(sizeof(int) * cropnb);
+    int * cam1crop_ycenter = (int*)malloc(sizeof(int) * cropnb);
+
+    int * cam2crop_xcenter = (int*)malloc(sizeof(int) * cropnb);
+    int * cam2crop_ycenter = (int*)malloc(sizeof(int) * cropnb);
+
+
+    for (int crop=0; crop<cropnb; crop++)
+    {
+        char keystring[20];
+
+        sprintf(keystring, "cam1.crop%d.xcenter", crop);
+        for (int i = 0; i < pair_count; i++) {
+            if (strcmp(config[i].key, keystring) == 0) {
+                cam1crop_xcenter[crop] = atoi(config[i].value);
+            }
+        }
+        sprintf(keystring, "cam1.crop%d.ycenter", crop);
+        for (int i = 0; i < pair_count; i++) {
+            if (strcmp(config[i].key, keystring) == 0) {
+                cam1crop_ycenter[crop] = atoi(config[i].value);
+            }
+        }
+    }
+
+    for (int crop=0; crop<cropnb; crop++)
+    {
+        char keystring[20];
+
+        sprintf(keystring, "cam2.crop%d.xcenter", crop);
+        for (int i = 0; i < pair_count; i++) {
+            if (strcmp(config[i].key, keystring) == 0) {
+                cam2crop_xcenter[crop] = atoi(config[i].value);
+            }
+        }
+        sprintf(keystring, "cam2.crop%d.ycenter", crop);
+        for (int i = 0; i < pair_count; i++) {
+            if (strcmp(config[i].key, keystring) == 0) {
+                cam2crop_ycenter[crop] = atoi(config[i].value);
+            }
+        }
+    }
+
+
+
 
 
     // Scan FITS files in directory
@@ -297,6 +361,13 @@ static errno_t compute_function()
                        fitsfileinfo[file_count].kw[kwi].comment
                       );*/
             }
+
+            fitsfileinfo[file_count].destframeidx = (int *)malloc(sizeof(int) * finfo.naxes[2]);
+            for(int frame_idx=0; frame_idx<finfo.naxes[2]; frame_idx++)
+            {
+                fitsfileinfo[file_count].destframeidx[frame_idx] = -1;
+            }
+
             file_count++;
         }
         if (scanstatus == 2) // error
@@ -527,7 +598,10 @@ static errno_t compute_function()
     AlignedPoint* syncseq = (AlignedPoint *)malloc(sizeof(AlignedPoint) * (cam1nbframe+cam2nbframe));
 
     int nbmatchedpts =
-        synchronize_timestreams2(cam1frametime, cam1nbframe, cam2frametime, cam2nbframe, 0.1, syncseq, (cam1nbframe+cam2nbframe));
+        synchronize_timestreams2(
+            cam1frametime, cam1nbframe,
+            cam2frametime, cam2nbframe,
+            0.1, syncseq, (cam1nbframe+cam2nbframe));
 
 
 
@@ -559,23 +633,169 @@ static errno_t compute_function()
         int franeidx1 = cam1frameindex[syncseq[i].index1];
         int franeidx2 = cam2frameindex[syncseq[i].index2];
         // print each matched point
-        printf("[%4d] %5d %5d    %.6f %.6f   %6f    %2d %2d    %s %s\n", i,
+        printf("[%4d]  %4.1f %4.1f   %5d %5d    %.6f %.6f   %6f    (%2d %3d) (%2d %3d)     %s %s\n", i,
+               cam_PDIframe[0][franeidx1].WPangle,
+               cam_PDIframe[1][franeidx2].WPangle,
                syncseq[i].index1, syncseq[i].index2,
                cam1frametime[syncseq[i].index1],
                cam2frametime[syncseq[i].index2],
                cam1frametime[syncseq[i].index1]-cam2frametime[syncseq[i].index2],
-               cam_PDIframe[0][syncseq[i].index1].fileindex,
-               cam_PDIframe[1][syncseq[i].index2].fileindex,
-               fitsfileinfo[cam_PDIframe[0][syncseq[i].index1].fileindex].fname,
-               fitsfileinfo[cam_PDIframe[1][syncseq[i].index2].fileindex].fname
+               cam_PDIframe[0][franeidx1].fileindex, cam_PDIframe[0][franeidx1].frameindex,
+               cam_PDIframe[1][franeidx2].fileindex, cam_PDIframe[1][franeidx2].frameindex,
+               fitsfileinfo[cam_PDIframe[0][franeidx1].fileindex].fname,
+               fitsfileinfo[cam_PDIframe[1][franeidx2].fileindex].fname
               );
+        fitsfileinfo[cam_PDIframe[0][franeidx1].fileindex].selected = 1; // selected for camera 1
+        fitsfileinfo[cam_PDIframe[1][franeidx2].fileindex].selected = 2; // selected for camera 2
 
-
-
+        // write destination indices
+        fitsfileinfo[cam_PDIframe[0][franeidx1].fileindex].destframeidx[cam_PDIframe[0][franeidx1].frameindex] = i;
+        fitsfileinfo[cam_PDIframe[1][franeidx2].fileindex].destframeidx[cam_PDIframe[1][franeidx2].frameindex] = i;
 
         previndex1 = syncseq[i].index1;
         previndex2 = syncseq[i].index2;
     }
+
+
+
+
+    // Read image content
+    printf("xsize = %ld  ysize = %ld\n", xsize, ysize);
+    printf("cropnb = %d\n", cropnb);
+
+    IMGID imgcam1  = makeIMGID_3D("cam1", xsize*cropnb, ysize, nbmatchedpts);
+    imcreateIMGID(&imgcam1);
+    list_image_ID();
+
+    for(int file_idx=0; file_idx<file_count; file_idx++)
+    {
+        // read pixel array
+        fitsfile *fptr;     // FITS file pointer
+        int status = 0;     // CFITSIO status value MUST be initialized to 0
+        int bitpix, naxis;
+        long naxes[3];      // Dimensions of the image (NAXIS1, NAXIS2)
+        long fpixel = 1;    // First pixel to read (1-based)
+        long nelements;     // Total number of pixels to read
+        float *buffer;      // Memory buffer to hold the image
+
+        // Open the FITS file for reading
+        if (fits_open_file(&fptr, fitsfileinfo[file_idx].fname, READONLY, &status)) {
+            fits_report_error(stderr, status);
+            return(status);
+        }
+        else {
+            // If we get here, status is still 0, meaning the file opened successfully.
+            int total_hdus = 0;
+            // Get the total number of HDUs in the file
+            printf("Getting total number of HDUs\n");
+            if (fits_get_num_hdus(fptr, &total_hdus, &status)) {
+                fits_report_error(stderr, status);
+                fits_close_file(fptr, &status);
+                return(status);
+            }
+            printf("Total number of HDUs: %d\n", total_hdus);
+
+            // move to last HDU
+            printf("Moving to last HDU\n");
+            if (fits_movabs_hdu(fptr, total_hdus, NULL, &status)) {
+                fits_report_error(stderr, status);
+                return(status);
+            }
+
+            // get image size, bitpix
+            printf("Getting image size and bitpix\n");
+            if (fits_get_img_param(fptr, 8, &bitpix, &naxis, naxes, &status)) {
+                fits_report_error(stderr, status);
+                return(status);
+            }
+
+
+
+            // Calculate the total number of pixels
+            nelements = naxes[0] * naxes[1] * naxes[2];
+            printf("Image input size : %ld x %ld x %ld = %ld pixels\n", naxes[0], naxes[1], naxes[2], nelements);
+
+
+            // Allocate memory for the image buffer
+            buffer = (float *) malloc(nelements * sizeof(float));
+            if (buffer == NULL) {
+                printf("Memory allocation error\n");
+                return(1);
+            }
+
+            // Read the entire image into the buffer
+            // TFLOAT specifies that we want the data converted to float in our buffer.
+            if (fits_read_img(fptr, TFLOAT, fpixel, nelements, NULL, buffer, NULL, &status)) {
+                fits_report_error(stderr, status);
+            } else {
+                printf("Image read successfully into buffer.\n");
+                // Example: Print the value of the first pixel
+                printf("Value of the first pixel (1,1): %f\n", buffer[0]);
+            }
+            // Close the FITS file
+            fits_close_file(fptr, &status);
+
+
+
+
+            if(fitsfileinfo[file_idx].selected == 1)
+            {
+                // write pixels to cam1
+                int nbframe = fitsfileinfo[file_idx].naxes[2];
+                for(int frame_idx=0; frame_idx<nbframe; frame_idx++)
+                {
+                    int destframeidx = fitsfileinfo[file_idx].destframeidx[frame_idx];
+                    printf("FILE %s frame %d  -> cam1 frame %d\n", fitsfileinfo[file_idx].fname, frame_idx, destframeidx);
+
+                    for(int crop=0; crop<cropnb; crop++)
+                    {
+                        long ii0offset = cam1crop_xcenter[crop] - xsize/2;
+                        long jj0offset = cam1crop_ycenter[crop] - ysize/2;
+                        long ii1offset = crop * xsize;
+                        long jj1offset = 0;
+
+                        for(long ii=0; ii<xsize; ii++)
+                        {
+                            long ii0 = ii + ii0offset;
+                            long ii1 = ii + ii1offset;
+                            for(long jj=0; jj<ysize; jj++)
+                            {
+                                long jj0 = jj + jj0offset;
+                                long jj1 = jj + jj1offset;
+                                imgcam1.im->array.F[xsize*ysize*cropnb*destframeidx + jj1*xsize*cropnb + ii1] = buffer[naxes[0]*naxes[1]*frame_idx + jj0*naxes[0] + ii0];
+                            }
+
+                        }
+                    }
+                }
+            }
+            if(fitsfileinfo[file_idx].selected == 2)
+            {
+                // write pixels to cam2
+                int nbframe = fitsfileinfo[file_idx].naxes[2];
+                for(int frame_idx=0; frame_idx<nbframe; frame_idx++)
+                {
+                    int destframeidx = fitsfileinfo[file_idx].destframeidx[frame_idx];
+                    printf("FILE %s frame %d  -> cam2 frame %d\n", fitsfileinfo[file_idx].fname, frame_idx, destframeidx);
+                }
+
+            }
+            // Free the memory
+            free(buffer);
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -589,6 +809,8 @@ static errno_t compute_function()
     free(cam1index);
     free(cam2time);
     free(cam2index);
+    free(cam1frametime);
+    free(cam2frametime);
 
 
 
