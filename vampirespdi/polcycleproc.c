@@ -4,15 +4,17 @@
 #include <float.h>  // Required for DBL_MAX
 
 #include "CommandLineInterface/CLIcore.h"
-#include "COREMOD_iofits/COREMOD_iofits.h"  // load_fits
+//#include "COREMOD_iofits/COREMOD_iofits.h"  // load_fits
 #include "COREMOD_tools/quicksort.h" // sort
 
 
 #include "read_asciiconf.h"
 #include "scanFITSfiles.h"
 
-
-
+//#include "linalgebra/linalgebra.h"
+#include "linalgebra/SingularValueDecomp.h"
+#include "linalgebra/SingularValueDecomp_mkM.h"
+#include "linalgebra/SingularValueDecomp_mkU.h"
 
 #define MAXNBFILES 10000
 
@@ -225,7 +227,31 @@ static int synchronize_timestreams2(
     return aligned_count;
 }
 
-
+void print_progress(double progress) {
+    const int BAR_WIDTH = 50;
+    if (progress < 0.0) {
+        progress = 0.0;
+    }
+    if (progress > 1.0) {
+        progress = 1.0;
+    }
+    int pos = (int)(BAR_WIDTH * progress);
+    printf("\r[");
+    for (int i = 0; i < BAR_WIDTH; ++i) {
+        if (i < pos) {
+            printf("=");
+        } else if (i == pos) {
+            printf(">");
+        } else {
+            printf(" ");
+        }
+    }
+    printf("] %3d%%", (int)(progress * 100.0));
+    if (progress == 1.0) {
+        printf("\n\n"); // Add an extra newline to ensure the next print starts on a new line
+    }
+    fflush(stdout);
+}
 
 
 /**
@@ -253,10 +279,12 @@ static errno_t compute_function()
 
     // Read rawdatadir entry from configuration
     char *rawdatadir = NULL;
-    long xsize = -1;
-    long ysize = -1;
-    int cropnb = -1;
-    long zsize = -1;
+
+    // default values
+    long xsize = 512;
+    long ysize = 512;
+    int cropnb = 4;
+    long zsize = 1;
     for (int i = 0; i < pair_count; i++) {
         if (strcmp(config[i].key, "rawdatadir") == 0) {
             rawdatadir = config[i].value;
@@ -273,6 +301,7 @@ static errno_t compute_function()
             cropnb = atoi(config[i].value);
         }
     }
+    long xysize = xsize * ysize * cropnb;
 
     int * cam1crop_xcenter = (int*)malloc(sizeof(int) * cropnb);
     int * cam1crop_ycenter = (int*)malloc(sizeof(int) * cropnb);
@@ -665,6 +694,10 @@ static errno_t compute_function()
 
     IMGID imgcam1  = makeIMGID_3D("cam1", xsize*cropnb, ysize, nbmatchedpts);
     imcreateIMGID(&imgcam1);
+
+    IMGID imgcam2  = makeIMGID_3D("cam2", xsize*cropnb, ysize, nbmatchedpts);
+    imcreateIMGID(&imgcam2);
+
     list_image_ID();
 
     for(int file_idx=0; file_idx<file_count; file_idx++)
@@ -769,6 +802,7 @@ static errno_t compute_function()
                     }
                 }
             }
+
             if(fitsfileinfo[file_idx].selected == 2)
             {
                 // write pixels to cam2
@@ -777,6 +811,27 @@ static errno_t compute_function()
                 {
                     int destframeidx = fitsfileinfo[file_idx].destframeidx[frame_idx];
                     printf("FILE %s frame %d  -> cam2 frame %d\n", fitsfileinfo[file_idx].fname, frame_idx, destframeidx);
+
+                    for(int crop=0; crop<cropnb; crop++)
+                    {
+                        long ii0offset = cam2crop_xcenter[crop] - xsize/2;
+                        long jj0offset = cam2crop_ycenter[crop] - ysize/2;
+                        long ii1offset = crop * xsize;
+                        long jj1offset = 0;
+
+                        for(long ii=0; ii<xsize; ii++)
+                        {
+                            long ii0 = ii + ii0offset;
+                            long ii1 = ii + ii1offset;
+                            for(long jj=0; jj<ysize; jj++)
+                            {
+                                long jj0 = jj + jj0offset;
+                                long jj1 = jj + jj1offset;
+                                imgcam2.im->array.F[xsize*ysize*cropnb*destframeidx + jj1*xsize*cropnb + ii1] = buffer[naxes[0]*naxes[1]*frame_idx + jj0*naxes[0] + ii0];
+                            }
+
+                        }
+                    }
                 }
 
             }
@@ -786,36 +841,134 @@ static errno_t compute_function()
     }
 
 
+    // Construct a set of polarization-balanced modes
+    // For each mode, an average of the opposite polarization states is added
+
+    IMGID imgcam1pb  = makeIMGID_3D("cam1pb", xsize*cropnb, ysize, nbmatchedpts);
+    imcreateIMGID(&imgcam1pb);
+
+    IMGID imgcam2pb  = makeIMGID_3D("cam2pb", xsize*cropnb, ysize, nbmatchedpts);
+    imcreateIMGID(&imgcam2pb);
 
 
 
+    // Polarization vector for each frame
+    // Define polX and polY arrays for polarization balancing
+    // Both need to be zero on the linear combination of output frames
+    double *polXidx = (double *)malloc(sizeof(double) * nbmatchedpts);
+    double *polYidx = (double *)malloc(sizeof(double) * nbmatchedpts);
 
-
-
-
-
-
-
-
-
-
-    for (int cam_idx = 0; cam_idx < 2; cam_idx++) {
-        free(cam_PDIframe[cam_idx]);
+    for(int idx=0; idx<nbmatchedpts; idx++)
+    {
+        double WPangle = cam_PDIframe[0][idx].WPangle;
+        polXidx[idx] = cos(4.0*WPangle * M_PI / 180.0);
+        polYidx[idx] = sin(4.0*WPangle * M_PI / 180.0);
     }
 
-    free(syncseq);
+    // defines linear combination of input images to create output (polarization balanced) images
+    double *vecarray = (double *)malloc(sizeof(double) * nbmatchedpts);
+    double eps = 1e-6; // don't bother mixing this component if coefficient is below this limit
 
-    free(cam1time);
-    free(cam1index);
-    free(cam2time);
-    free(cam2index);
-    free(cam1frametime);
-    free(cam2frametime);
+    for (int idxout = 0; idxout <nbmatchedpts; idxout++) {
+
+        double sum_dot_product = 0.0;
+        for (int idxin = 0; idxin <nbmatchedpts; idxin++) {
+            // Compute dot product between 2D polarization vectors idx0 and idx1
+            double dot_product = polXidx[idxin] * polXidx[idxout] + polYidx[idxin] * polYidx[idxout];
+            // only keep points for which dot_product is negative, otherwise set to zero
+            if (dot_product > 0.0) {
+                dot_product = 0.0;
+            }
+            vecarray[idxin] = dot_product;
+            sum_dot_product += dot_product;
+        }
+        // set sum to 1.0 for flux balancing
+        for (int idxin = 0; idxin <nbmatchedpts; idxin++) {
+            vecarray[idxin] /= sum_dot_product;
+        }
+
+
+        // Initialize output to input
+        memcpy(imgcam1pb.im->array.F + idxout * xysize, imgcam1.im->array.F + idxout * xysize, xysize * sizeof(float));
+        memcpy(imgcam2pb.im->array.F + idxout * xysize, imgcam2.im->array.F + idxout * xysize, xysize * sizeof(float));
+
+        // Subtract the vecarray components
+        for (int idxin = 0; idxin <nbmatchedpts; idxin++) {
+            // subtract slice idxin of imgcam1 from slice idxout of imgcam1pb
+            if (fabs(vecarray[idxin]) > eps) {
+                for(long pixi=0; pixi<xysize; pixi++)
+                {
+                    imgcam1pb.im->array.F[idxout*xysize + pixi] += vecarray[idxin] * imgcam1.im->array.F[idxin*xysize + pixi];
+                }
+                for(long pixi=0; pixi<xysize; pixi++)
+                {
+                    imgcam2pb.im->array.F[idxout*xysize + pixi] += vecarray[idxin] * imgcam2.im->array.F[idxin*xysize + pixi];
+                }
+            }
+        }
+
+        // Multiply by 0.5 to match original flux level
+        for(long pixi=0; pixi<xysize; pixi++)
+        {
+            imgcam1pb.im->array.F[idxout*xysize + pixi] *= 0.5;
+            imgcam2pb.im->array.F[idxout*xysize + pixi] *= 0.5;
+        }
+
+    }
+
+    free(vecarray);
+    free(polXidx);
+    free(polYidx);
 
 
 
+    // PCA of imgcam1pb
+    // modes are in imgU
+
+    IMGID img1pbU  = mkIMGID_from_name("cam1pb_U");
+    IMGID img1pbS  = mkIMGID_from_name("cam1pb_S");
+    IMGID img1pbV  = mkIMGID_from_name("cam1pb_V");
+    int GPUdev = -1;
+    float SVlimit = 0.0001;
+    uint32_t SVDmaxNBmode = 2000;
+    uint64_t compSVDmode = 0; // PCA
+    uint32_t Vdim0 = 0;
+
+    compute_SVD(
+        imgcam1pb,
+        img1pbU,
+        img1pbS,
+        img1pbV,
+        Vdim0,
+        SVlimit,
+        SVDmaxNBmode,
+        GPUdev,
+        compSVDmode
+    );
 
 
+
+    // Compute cam2 mode conterparts to cam1 modes
+    IMGID img2pbU = mkIMGID_from_name("cam2U");
+    IMGID img2pbUS = mkIMGID_from_name("cam2US");
+    compute_SVDU(
+        imgcam2pb,
+        img1pbV,
+        img1pbS,
+        &img2pbU,
+        &img2pbUS,
+        GPUdev
+    );
+
+    printf("RECONSTRUCTING imcam2\n");
+    IMGID img2pbM  = mkIMGID_from_name("cam2rec");
+    SVDmkM(
+        img2pbU,
+        img1pbS,
+        img1pbV,
+        &img2pbM,
+        GPUdev
+    );
 
 
 

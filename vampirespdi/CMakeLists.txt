@@ -1,3 +1,5 @@
+include(CMakePrintHelpers)
+
 set(LIBNAME "vampirespdi")
 
 # list source files (.c) other than modulename.c
@@ -19,8 +21,12 @@ set(SCRIPTFILES
 
 set(LINKLIBS
 	CLIcore
+	milklinalgebra
 )
 
+set(PLUGINSINCLDIRS
+	${PROJECT_SOURCE_DIR}/plugins/milk-extra-src/
+)
 
 # DEFAULT SETTINGS
 # Do not change unless needed
@@ -45,9 +51,14 @@ project(lib_${LIBNAME}_project)
 #
 add_library(${LIBNAME} SHARED ${SRCNAME}.c ${SOURCEFILES})
 
+
+message(" ================ ${SRCNAME}: ${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}")
+
 # note: set to PUBLIC if other modules link to this one
-target_include_directories(${LIBNAME} PRIVATE ${PROJECT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${LIBNAME} PRIVATE ${PROJECT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/.. ${PLUGINSINCLDIRS})
 target_link_libraries(${LIBNAME} PRIVATE ${LINKLIBS})
+
+cmake_print_properties(TARGETS ${LIBNAME} PROPERTIES INCLUDE_DIRECTORIES)
 
 install(TARGETS ${LIBNAME} EXPORT milkTargets DESTINATION lib)
 install(FILES ${SRCNAME}.h ${INCLUDEFILES} DESTINATION include/${SRCNAME})
