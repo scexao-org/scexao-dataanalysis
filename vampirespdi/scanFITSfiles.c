@@ -21,7 +21,7 @@ int scan_nextFITSfiles(
 {
     static int init = 0; // toggles to 1 when starting scan
 
-    static int file_count = 0;
+    static int file_count __attribute__((unused)) = 0;
     static DIR *d;
     static struct dirent *dir;
 

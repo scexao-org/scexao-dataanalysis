@@ -9,7 +9,7 @@
 
 
 
-#include "CommandLineInterface/CLIcore.h"
+#include "CLIcore.h"
 
 #include "polcycleproc.h"
 

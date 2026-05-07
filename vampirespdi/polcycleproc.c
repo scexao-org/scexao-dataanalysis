@@ -3,9 +3,9 @@
 #include <math.h>   // Required for fabs()
 #include <float.h>  // Required for DBL_MAX
 
-#include "CommandLineInterface/CLIcore.h"
+#include "CLIcore.h"
 //#include "COREMOD_iofits/COREMOD_iofits.h"  // load_fits
-#include "COREMOD_tools/quicksort.h" // sort
+#include "quicksort.h" // sort
 
 
 #include "read_asciiconf.h"
@@ -15,6 +15,7 @@
 #include "linalgebra/SingularValueDecomp.h"
 #include "linalgebra/SingularValueDecomp_mkM.h"
 #include "linalgebra/SingularValueDecomp_mkU.h"
+#include "linalgebra/SGEMM.h"
 
 #define MAXNBFILES 10000
 
@@ -53,7 +54,7 @@ static CLICMDARGDEF farg[] =
         ".confname",
         "configuration file",
         "vamppdi.conf",
-        CLIARG_VISIBLE_DEFAULT,
+        (FPFLAG_DEFAULT_INPUT | FPFLAG_CLI_INPUT),
         (void **) &confname,
         NULL
     }
@@ -114,7 +115,7 @@ static int read_time_data(const char *filename, double *time_array, size_t array
         // Use sscanf to parse the line.
         // The '%*...' format specifiers read a value but discard it (assignment suppression).
         // We only care about the 1st (%d) and 5th (%lf) values.
-        int items_scanned = sscanf(line_buffer, "%d %*d %*lf %*lf %lf %*d %*d",
+        int items_scanned = sscanf(line_buffer, "%d %*d %*f %*f %lf %*d %*d",
                                    &frame_index, &absolute_time);
 
         // A correctly formatted data line will result in 2 successfully scanned items.
@@ -262,7 +263,7 @@ void print_progress(double progress) {
  *
  * @return errno_t
  */
-static errno_t compute_function()
+static MILK_HOT errno_t compute_function()
 {
     DEBUG_TRACE_FSTART();
 
@@ -284,7 +285,7 @@ static errno_t compute_function()
     long xsize = 512;
     long ysize = 512;
     int cropnb = 4;
-    long zsize = 1;
+    long zsize __attribute__((unused)) = 1;
     for (int i = 0; i < pair_count; i++) {
         if (strcmp(config[i].key, "rawdatadir") == 0) {
             rawdatadir = config[i].value;
@@ -312,7 +313,7 @@ static errno_t compute_function()
 
     for (int crop=0; crop<cropnb; crop++)
     {
-        char keystring[20];
+        char keystring[64];
 
         sprintf(keystring, "cam1.crop%d.xcenter", crop);
         for (int i = 0; i < pair_count; i++) {
@@ -330,7 +331,7 @@ static errno_t compute_function()
 
     for (int crop=0; crop<cropnb; crop++)
     {
-        char keystring[20];
+        char keystring[64];
 
         sprintf(keystring, "cam2.crop%d.xcenter", crop);
         for (int i = 0; i < pair_count; i++) {
@@ -506,7 +507,7 @@ static errno_t compute_function()
     for (int cam_idx = 0; cam_idx < 2; cam_idx++) {
         int current_nbfile = *nbfile_arr[cam_idx];
         int current_nbframe = *nbframe_arr[cam_idx];
-        double *current_time = time_arr[cam_idx];
+        double *current_time __attribute__((unused)) = time_arr[cam_idx];
         long *current_index = index_arr[cam_idx];
 
         printf("\nCollecting timing info for cam%d (%d files, %d frames)\n", cam_idx + 1, current_nbfile, current_nbframe);
@@ -692,10 +693,10 @@ static errno_t compute_function()
     printf("xsize = %ld  ysize = %ld\n", xsize, ysize);
     printf("cropnb = %d\n", cropnb);
 
-    IMGID imgcam1  = makeIMGID_3D("cam1", xsize*cropnb, ysize, nbmatchedpts);
+    IMGID imgcam1  = imgid_make_from_name_3D("cam1", xsize*cropnb, ysize, nbmatchedpts);
     imcreateIMGID(&imgcam1);
 
-    IMGID imgcam2  = makeIMGID_3D("cam2", xsize*cropnb, ysize, nbmatchedpts);
+    IMGID imgcam2  = imgid_make_from_name_3D("cam2", xsize*cropnb, ysize, nbmatchedpts);
     imcreateIMGID(&imgcam2);
 
     list_image_ID();
@@ -844,10 +845,10 @@ static errno_t compute_function()
     // Construct a set of polarization-balanced modes
     // For each mode, an average of the opposite polarization states is added
 
-    IMGID imgcam1pb  = makeIMGID_3D("cam1pb", xsize*cropnb, ysize, nbmatchedpts);
+    IMGID imgcam1pb  = imgid_make_from_name_3D("cam1pb", xsize*cropnb, ysize, nbmatchedpts);
     imcreateIMGID(&imgcam1pb);
 
-    IMGID imgcam2pb  = makeIMGID_3D("cam2pb", xsize*cropnb, ysize, nbmatchedpts);
+    IMGID imgcam2pb  = imgid_make_from_name_3D("cam2pb", xsize*cropnb, ysize, nbmatchedpts);
     imcreateIMGID(&imgcam2pb);
 
 
@@ -925,9 +926,10 @@ static errno_t compute_function()
     // PCA of imgcam1pb
     // modes are in imgU
 
-    IMGID img1pbU  = mkIMGID_from_name("cam1pb_U");
-    IMGID img1pbS  = mkIMGID_from_name("cam1pb_S");
-    IMGID img1pbV  = mkIMGID_from_name("cam1pb_V");
+    IMGID img1pbU  = imgid_make_from_name("cam1pb_U");
+    printf("[%d] img1pbU name = %s\n", __LINE__, img1pbU.name);
+    IMGID img1pbS  = imgid_make_from_name("cam1pb_S");
+    IMGID img1pbV  = imgid_make_from_name("cam1pb_V");
     int GPUdev = -1;
     float SVlimit = 0.0001;
     uint32_t SVDmaxNBmode = 2000;
@@ -936,21 +938,26 @@ static errno_t compute_function()
 
     compute_SVD(
         imgcam1pb,
-        img1pbU,
-        img1pbS,
-        img1pbV,
+        &img1pbU,
+        &img1pbS,
+        &img1pbV,
         Vdim0,
         SVlimit,
         SVDmaxNBmode,
         GPUdev,
-        compSVDmode
+        compSVDmode,
+        "cam1Un", "cam1Vn"
     );
 
-
+    list_image_ID();
+    printf("[%d]\n", __LINE__);
+    fflush(stdout);
+    printf("[%d] img1pbU naxis = %d\n", __LINE__, img1pbU.md->naxis);
+    fflush(stdout);
 
     // Compute cam2 mode conterparts to cam1 modes
-    IMGID img2pbU = mkIMGID_from_name("cam2U");
-    IMGID img2pbUS = mkIMGID_from_name("cam2US");
+    IMGID img2pbU = imgid_make_from_name("cam2U");
+    IMGID img2pbUS = imgid_make_from_name("cam2US");
     compute_SVDU(
         imgcam2pb,
         img1pbV,
@@ -960,8 +967,13 @@ static errno_t compute_function()
         GPUdev
     );
 
+    printf("[%d]\n", __LINE__);
+    fflush(stdout);
+    printf("[%d] img1pbU %s naxis = %d\n", __LINE__, img1pbU.md->name, img1pbU.md->naxis);
+    fflush(stdout);
+
     printf("RECONSTRUCTING imcam2\n");
-    IMGID img2pbM  = mkIMGID_from_name("cam2rec");
+    IMGID img2pbM  = imgid_make_from_name("cam2rec");
     SVDmkM(
         img2pbU,
         img1pbS,
@@ -971,6 +983,50 @@ static errno_t compute_function()
     );
 
 
+    // Reconstruct arbitrary image
+
+    // Number of image slices
+    int nbframe __attribute__((unused)) = 4;
+    // xpos and ypos for each slice
+    int xpos[4] = {-32, -32, 32, 32};
+    int ypos[4] = {-32, 32, -32, 32};
+
+    // Make image with astro spots
+    IMGID imgspots = imgid_make_from_name_3D("cam1spots", xsize*cropnb, ysize, 4);
+    imcreateIMGID(&imgspots);
+    for(int imgframe=0; imgframe<4; imgframe++)
+    {
+        int xpospix = xpos[imgframe] + xsize/2;
+        int ypospix = ypos[imgframe] + ysize/2;
+
+        imgspots.im->array.F[imgframe*xysize + xpospix*ysize + ypospix] = 1.0;
+    }
+
+
+    list_image_ID();
+
+    // Decompose image on img1pbU basis
+    IMGID img1spotsV  = imgid_make_from_name("cam1spotsV");
+
+    printf("[%d]\n", __LINE__);
+    fflush(stdout);
+    printf("[%d] img1pbU %s naxis = %d\n", __LINE__, img1pbU.md->name, img1pbU.md->naxis);
+    fflush(stdout);
+
+    computeSGEMM(
+        imgcam1pb, //imgspots,
+        img1pbU,
+        &img1spotsV,
+        1, 0, GPUdev);
+
+
+    // Reconstruct
+    IMGID img2spots  = imgid_make_from_name("cam2spots");
+    computeSGEMM(
+        img2pbU,
+        img1spotsV,
+        &img2spots,
+        0, 1, GPUdev);
 
 
     // Free the allocated memory when done.
